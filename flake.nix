@@ -1,26 +1,56 @@
 {
-  description = "HakuNeko Desktop Flake";
-
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/26.05";
+    crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
-      in
-      {
-        # Drops the package straight into `nix build`
-        packages.default = pkgs.callPackage ./default.nix { };
+  outputs = {
+    self,
+    nixpkgs,
+    crane,
+    flake-utils,
+    ...
+  }: let
+    # 1. Define the core build function that can take ANY pkgs
+    mkTimelauncher = {pkgs}: let
+      craneLib = crane.mkLib pkgs;
+      commonArgs = {
+        src = craneLib.cleanCargoSource ./.;
+        strictDeps = true;
+        buildInputs = [];
+      };
+    in
+      craneLib.buildPackage (
+        commonArgs
+        // {
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        }
+      );
+  in
+    # 2. Wire up the standard flake outputs using the fallback default pkgs
+    flake-utils.lib.eachDefaultSystem (
+      system: let
+        # Default fallback pkgs if evaluated standalone
+        defaultPkgs = nixpkgs.legacyPackages.${system};
 
-        # Creates a `nix develop` environment with the package's build dependencies
-        devShells.default = pkgs.mkShell {
-          inputsFrom = [ self.packages.${system}.default ];
+        # Build scrollsaw using the standalone fallback
+        timelauncherDefault = mkTimelauncher {pkgs = defaultPkgs;};
+      in {
+        checks = {timelauncher = timelauncherDefault;};
 
-          # Add extra debugging tools here if you want them during development
-          nativeBuildInputs = with pkgs; [ ];
+        # standalone default package output (uses pinned flake nixpkgs)
+        packages.default = timelauncherDefault;
+
+        # Expose the builder function so other flakes can pass their global pkgs!
+        lib.mkPackage = mkTimelauncher;
+
+        apps.default = flake-utils.lib.mkApp {drv = timelauncherDefault;};
+
+        devShells.default = (crane.mkLib defaultPkgs).devShell {
+          checks = self.checks.${system};
+          packages = [];
         };
-      });
+      }
+    );
 }
